@@ -7,6 +7,7 @@
 <style>
   :root { --blue:#1d4fb8; --ink:#15233d; --sub:#5a6880; --bg:#f3f6fb; --yellow:#f5b70a; --red:#d9480f; }
   * { box-sizing: border-box; }
+  [hidden] { display:none !important; }
   body { margin:0; font-family: -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif; background:var(--bg); color:var(--ink); }
   .wrap { max-width:520px; margin:0 auto; min-height:100vh; display:flex; flex-direction:column; }
   header { display:flex; justify-content:space-between; align-items:center; padding:14px 16px; background:#fff; border-bottom:1px solid #e1e7f0; }
@@ -85,12 +86,20 @@ async function api(body) {
 function showSetup(v) { $('setup').hidden = !v; $('foot').hidden = v; }
 $('changeKey').onclick = () => showSetup(true);
 $('saveKey').onclick = async () => {
+  const btn = $('saveKey');
   key = $('key').value.trim();
-  const r = await api({ ping: true });
-  if (!r.ok) { alertBox(r.error || '合言葉が違います'); return; }
-  try { localStorage.setItem('aso_voice_key', key); } catch (e) {}
-  $('who').textContent = r.name + ' さん';
-  showSetup(false);
+  if (!key) return;
+  btn.disabled = true; btn.textContent = '確認中…';
+  try {
+    const r = await api({ ping: true });
+    if (!r.ok) { alertBox(r.error || '合言葉が違います'); return; }
+    try { localStorage.setItem('aso_voice_key', key); } catch (e) {}
+    $('who').textContent = r.name + ' さん';
+    showSetup(false);
+    add('sys', 'OK！黄色いマイクを押して話しかけてください');
+  } catch (e) {
+    alertBox('つながりませんでした：' + e.message);
+  } finally { btn.disabled = false; btn.textContent = '決定'; }
 };
 function alertBox(t) { add('sys', t); }
 
@@ -148,8 +157,9 @@ async function start() {
   if (!key) { showSetup(true); return; }
   running = true; $('mic').classList.add('on'); setState('つないでいます…');
   try {
-    outCtx = new (window.AudioContext || window.webkitAudioContext)();
-    await outCtx.resume();
+    const AC = window.AudioContext || window.webkitAudioContext;
+    outCtx = new AC(); micCtx = new AC();   // iPhoneは押した瞬間に作らないと音が止まる
+    outCtx.resume(); micCtx.resume();
     micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
     const j = await api({ liveToken: true });
     if (!j.ok) throw new Error(j.error || 'トークンを作れませんでした');
@@ -186,7 +196,7 @@ function stop(msg) {
 
 /* ---------- マイク → 16kHz PCM ---------- */
 function startMic() {
-  micCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (micCtx.state !== 'running') micCtx.resume();
   const src = micCtx.createMediaStreamSource(micStream);
   proc = micCtx.createScriptProcessor(4096, 1, 1);
   const ratio = micCtx.sampleRate / 16000;
