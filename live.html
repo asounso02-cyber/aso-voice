@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>トライもん 音声会話（試作）</title>
+<style>
+  :root { --blue:#1d4fb8; --ink:#15233d; --sub:#5a6880; --bg:#f3f6fb; --yellow:#f5b70a; --red:#d9480f; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif; background:var(--bg); color:var(--ink); }
+  .wrap { max-width:520px; margin:0 auto; min-height:100vh; display:flex; flex-direction:column; }
+  header { display:flex; justify-content:space-between; align-items:center; padding:14px 16px; background:#fff; border-bottom:1px solid #e1e7f0; }
+  header b { font-size:17px; }
+  header small { color:var(--sub); font-size:12px; }
+  header button { border:0; background:none; color:var(--blue); font-size:13px; text-decoration:underline; }
+  #log { flex:1; padding:14px; display:flex; flex-direction:column; gap:10px; overflow-y:auto; }
+  .b { max-width:85%; padding:11px 13px; border-radius:16px; line-height:1.6; font-size:15px; white-space:pre-wrap; }
+  .ai { align-self:flex-start; background:#fff; border-radius:4px 16px 16px 16px; }
+  .me { align-self:flex-end; background:var(--blue); color:#fff; border-radius:16px 4px 16px 16px; }
+  .sys { align-self:center; font-size:12px; color:var(--sub); }
+  .card { align-self:stretch; background:#fff; border:2px solid var(--yellow); border-radius:14px; padding:12px 14px; font-size:14px; line-height:1.7; white-space:pre-wrap; }
+  .card.ok { border-color:#2b8a3e; }
+  footer { position:sticky; bottom:0; background:#fff; border-top:1px solid #e1e7f0; padding:14px 16px 22px; display:flex; flex-direction:column; align-items:center; gap:8px; }
+  #mic { width:84px; height:84px; border-radius:42px; border:0; background:var(--yellow); display:flex; align-items:center; justify-content:center; box-shadow:0 4px 12px rgba(245,183,10,.35); }
+  #mic.on { background:var(--red); box-shadow:0 0 0 0 rgba(217,72,15,.5); animation:p 1.6s infinite; }
+  @keyframes p { 0%{box-shadow:0 0 0 0 rgba(217,72,15,.45)} 70%{box-shadow:0 0 0 18px rgba(217,72,15,0)} 100%{box-shadow:0 0 0 0 rgba(217,72,15,0)} }
+  #state { font-size:14px; font-weight:700; }
+  #hint { font-size:12px; color:var(--sub); text-align:center; }
+  #setup { padding:24px 16px; display:flex; flex-direction:column; gap:12px; }
+  #setup input { font-size:18px; padding:12px; border:1px solid #c9d3e3; border-radius:12px; }
+  #setup button { font-size:16px; padding:14px; border:0; border-radius:12px; background:var(--blue); color:#fff; font-weight:700; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div><b>トライもん</b> <small>音声会話の試作</small><br><small id="who"></small></div>
+    <button id="changeKey" type="button">合言葉を変える</button>
+  </header>
+
+  <div id="setup" hidden>
+    <b>はじめに合言葉を入れてください</b>
+    <label for="key" style="font-size:13px;color:var(--sub)">社長から聞いた合言葉（1回入れれば次からは不要）</label>
+    <input id="key" autocomplete="off" inputmode="latin">
+    <button id="saveKey" type="button">決定</button>
+  </div>
+
+  <div id="log"></div>
+
+  <footer id="foot">
+    <button id="mic" type="button" aria-label="話しかける">
+      <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#15233d" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v1a7 7 0 0 0 14 0v-1"/><path d="M12 18v4"/></svg>
+    </button>
+    <div id="state">押して話しはじめる</div>
+    <div id="hint">話しかけるだけで仮配車を登録できます。途中で割り込んでも大丈夫。もう一度押すと終わります</div>
+  </footer>
+</div>
+
+<script>
+const API = 'https://script.google.com/macros/s/AKfycbyAzCK7MA4kWlkeFBu1ZObxm5xeoxoi8NUyHXBFLP9MFKL8y_9VQPvGUw7b9MGJnQuqLw/exec';
+const WS_BASE = 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained';
+const $ = id => document.getElementById(id);
+let key = '';
+try { key = localStorage.getItem('aso_voice_key') || ''; } catch (e) {}
+
+let ws = null, running = false, micCtx = null, micStream = null, proc = null;
+let outCtx = null, playHead = 0, playing = [];
+let aiBubble = null, meBubble = null, wakeLock = null;
+
+function add(cls, text) {
+  const d = document.createElement('div'); d.className = cls; d.textContent = text;
+  $('log').appendChild(d); $('log').scrollTop = 1e9; return d;
+}
+function setState(t) { $('state').textContent = t; }
+
+async function api(body) {
+  const r = await fetch(API, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify(Object.assign({ webKey: key }, body)) });
+  return r.json();
+}
+
+/* ---------- 合言葉 ---------- */
+function showSetup(v) { $('setup').hidden = !v; $('foot').hidden = v; }
+$('changeKey').onclick = () => showSetup(true);
+$('saveKey').onclick = async () => {
+  key = $('key').value.trim();
+  const r = await api({ ping: true });
+  if (!r.ok) { alertBox(r.error || '合言葉が違います'); return; }
+  try { localStorage.setItem('aso_voice_key', key); } catch (e) {}
+  $('who').textContent = r.name + ' さん';
+  showSetup(false);
+};
+function alertBox(t) { add('sys', t); }
+
+/* ---------- AIへの指示 ---------- */
+function instruction(j) {
+  const m = j.masters;
+  return [
+    'あなたは麻生株式会社のアシスタント「トライもん」。運送会社の配車係を手伝う。話し相手は ' + j.name + ' さん。',
+    '日本語で、短く、やさしく話す。1回に聞くのは1つだけ。',
+    '今日は ' + j.today + '（日本時間）。「20日」など月がない日付は今日以降で一番近い日。',
+    '',
+    '仕事：仮配車（輸送の予定）を聞き取って登録する。',
+    '聞く順番（すでに分かっている項目は聞かない）：荷主 → 日付（積込日か着日。着日だけなら前日積みか当日積みか） → 積地 → 降地 → 運賃（税抜。高速代が別なら一緒に） → 担当ドライバーと車番 → 品目・重量（なければ飛ばしてよい）。',
+    '音声認識なので「積み」が「済み」と聞こえることがある。「20日積みの23日着」は積込日20日・着日23日。',
+    'そろったら、要点を1〜2文で読み上げて「これで仮登録していい？」と聞く。',
+    '相手が「はい」「そのまま」「お願い」などと認めたときだけ、register_haisha を呼ぶ。直したいと言われたら直してからもう一度確認する。',
+    'register_haisha の結果が返ったら、登録番号を伝える。似ている便があれば、消していないので確認してほしいと伝える。',
+    '「キャンセル」「やめる」と言われたら登録しない。',
+    '',
+    '取引先（請求先の略称：正式名）：' + m.customers,
+    'これまでの荷主名→請求先：' + m.shippers + '（shipper はこの表記に合わせる）',
+    'ドライバー（表示名：呼び名）：' + m.drivers + '（driver は表示名で）',
+    '車番：' + m.vehicles,
+    'よく使う積地・降地：' + m.places,
+    '車種の選択肢：' + j.vehicleTypes.join('、')
+  ].join('\n');
+}
+const TOOLS = [{ functionDeclarations: [{
+  name: 'register_haisha',
+  description: '相手が確認した仮配車を「輸送実績」シートに状況＝仮で1件登録する。確認が取れる前に呼んではいけない。',
+  parameters: { type: 'OBJECT', properties: {
+    shipper: { type: 'STRING', description: '荷主の正式名' },
+    billTo: { type: 'STRING', description: '請求先の略称' },
+    loadDate: { type: 'STRING', description: '積込日 YYYY-MM-DD' },
+    deliveryDate: { type: 'STRING', description: '着日 YYYY-MM-DD' },
+    preload: { type: 'BOOLEAN', description: '前日積みなら true' },
+    from: { type: 'STRING', description: '積地' },
+    to: { type: 'STRING', description: '降地' },
+    vehicleType: { type: 'STRING', description: '車種' },
+    fare: { type: 'NUMBER', description: '運賃 税抜 円' },
+    toll: { type: 'STRING', description: '高速代。金額が分かれば数字、分からなければ「あり」' },
+    driver: { type: 'STRING', description: 'ドライバーの表示名' },
+    vehicleNo: { type: 'STRING', description: '車番' },
+    item: { type: 'STRING', description: '品目' },
+    weight: { type: 'NUMBER', description: '重量 kg' },
+    memo: { type: 'STRING', description: 'その他の大事な情報' }
+  }, required: ['shipper'] }
+}]}];
+
+/* ---------- 開始・終了 ---------- */
+$('mic').onclick = () => running ? stop('終わりました') : start();
+
+async function start() {
+  if (!key) { showSetup(true); return; }
+  running = true; $('mic').classList.add('on'); setState('つないでいます…');
+  try {
+    outCtx = new (window.AudioContext || window.webkitAudioContext)();
+    await outCtx.resume();
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+    const j = await api({ liveToken: true });
+    if (!j.ok) throw new Error(j.error || 'トークンを作れませんでした');
+    $('who').textContent = j.name + ' さん';
+    try { wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {}
+    ws = new WebSocket(WS_BASE + '?access_token=' + encodeURIComponent(j.token));
+    ws.onopen = () => ws.send(JSON.stringify({ setup: {
+      model: 'models/' + j.model,
+      generationConfig: { responseModalities: ['AUDIO'] },
+      systemInstruction: { parts: [{ text: instruction(j) }] },
+      tools: TOOLS,
+      inputAudioTranscription: {},
+      outputAudioTranscription: {}
+    }}));
+    ws.onmessage = onMessage;
+    ws.onclose = e => { if (running) stop('接続が切れました（' + e.code + '）。もう一度押してください'); };
+    ws.onerror = () => {};
+  } catch (e) {
+    stop('始められませんでした：' + e.message);
+  }
+}
+
+function stop(msg) {
+  running = false; $('mic').classList.remove('on'); setState('押して話しはじめる');
+  if (msg) add('sys', msg);
+  try { proc && proc.disconnect(); } catch (e) {}
+  try { micStream && micStream.getTracks().forEach(t => t.stop()); } catch (e) {}
+  try { micCtx && micCtx.close(); } catch (e) {}
+  try { ws && ws.close(); } catch (e) {}
+  stopPlayback();
+  try { wakeLock && wakeLock.release(); } catch (e) {}
+  ws = null; proc = null; micCtx = null; micStream = null;
+}
+
+/* ---------- マイク → 16kHz PCM ---------- */
+function startMic() {
+  micCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const src = micCtx.createMediaStreamSource(micStream);
+  proc = micCtx.createScriptProcessor(4096, 1, 1);
+  const ratio = micCtx.sampleRate / 16000;
+  proc.onaudioprocess = ev => {
+    if (!ws || ws.readyState !== 1) return;
+    const input = ev.inputBuffer.getChannelData(0);
+    const n = Math.floor(input.length / ratio);
+    const pcm = new Int16Array(n);
+    for (let i = 0; i < n; i++) {
+      const s = Math.max(-1, Math.min(1, input[Math.floor(i * ratio)]));
+      pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    }
+    ws.send(JSON.stringify({ realtimeInput: { audio: { data: b64(pcm.buffer), mimeType: 'audio/pcm;rate=16000' } } }));
+  };
+  src.connect(proc); proc.connect(micCtx.destination);
+}
+function b64(buf) {
+  let s = ''; const b = new Uint8Array(buf);
+  for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+
+/* ---------- 受信 ---------- */
+async function onMessage(e) {
+  const m = JSON.parse(typeof e.data === 'string' ? e.data : await e.data.text());
+  if (m.setupComplete !== undefined) {
+    startMic(); setState('聞いています');
+    ws.send(JSON.stringify({ realtimeInput: { text: '（会話が始まりました。短くあいさつして、仮配車の内容を聞いてください）' } }));
+    return;
+  }
+  if (m.toolCall) { handleTool(m.toolCall); return; }
+  const sc = m.serverContent;
+  if (!sc) return;
+  if (sc.interrupted) { stopPlayback(); aiBubble = null; }
+  if (sc.inputTranscription && sc.inputTranscription.text) {
+    if (!meBubble) meBubble = add('b me', '');
+    meBubble.textContent += sc.inputTranscription.text;
+    aiBubble = null;
+  }
+  if (sc.outputTranscription && sc.outputTranscription.text) {
+    if (!aiBubble) aiBubble = add('b ai', '');
+    aiBubble.textContent += sc.outputTranscription.text;
+    meBubble = null;
+  }
+  (sc.modelTurn && sc.modelTurn.parts || []).forEach(p => {
+    if (p.inlineData && p.inlineData.data) playPcm(p.inlineData.data, p.inlineData.mimeType);
+  });
+  if (sc.turnComplete) { aiBubble = null; meBubble = null; setState('聞いています'); }
+  $('log').scrollTop = 1e9;
+}
+
+/* ---------- 再生 ---------- */
+function playPcm(data, mime) {
+  const rate = Number(((mime || '').match(/rate=(\d+)/) || [0, 24000])[1]);
+  const bin = atob(data); const n = bin.length / 2;
+  const buf = outCtx.createBuffer(1, n, rate); const ch = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) {
+    let v = bin.charCodeAt(i * 2) | (bin.charCodeAt(i * 2 + 1) << 8);
+    if (v >= 0x8000) v -= 0x10000;
+    ch[i] = v / 0x8000;
+  }
+  const s = outCtx.createBufferSource(); s.buffer = buf; s.connect(outCtx.destination);
+  playHead = Math.max(playHead, outCtx.currentTime + 0.03);
+  s.start(playHead); playHead += buf.duration;
+  playing.push(s); s.onended = () => { playing = playing.filter(x => x !== s); };
+  setState('話しています（割り込めます）');
+}
+function stopPlayback() {
+  playing.forEach(s => { try { s.stop(); } catch (e) {} });
+  playing = []; if (outCtx) playHead = outCtx.currentTime;
+}
+
+/* ---------- 登録（ツール） ---------- */
+async function handleTool(tc) {
+  const responses = [];
+  for (const fc of tc.functionCalls || []) {
+    if (fc.name !== 'register_haisha') { responses.push({ id: fc.id, name: fc.name, response: { ok: false, error: 'unknown' } }); continue; }
+    const card = add('card', '登録しています…\n' + describe(fc.args || {}));
+    let r;
+    try { r = await api({ register: fc.args || {} }); } catch (e) { r = { ok: false, error: e.message }; }
+    if (r.ok) {
+      card.classList.add('ok');
+      card.textContent = '登録しました（No.' + r.no + '・状況：仮）\n' + r.summary +
+        (r.similar && r.similar.length ? '\n\n似ている便があります（消していません）：\n' + r.similar.map(s => 'No.' + s.no + '：' + s.summary).join('\n') : '');
+    } else {
+      card.textContent = '登録できませんでした：' + (r.error || '');
+    }
+    responses.push({ id: fc.id, name: fc.name, response: r.ok ? { ok: true, no: r.no, similar: (r.similar || []).map(s => 'No.' + s.no + ' ' + s.summary) } : { ok: false, error: r.error } });
+  }
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ toolResponse: { functionResponses: responses } }));
+}
+function describe(a) {
+  return [a.shipper, (a.loadDate ? a.loadDate + '積' : '') + (a.deliveryDate ? ' ' + a.deliveryDate + '着' : ''),
+    (a.from || '') + ' → ' + (a.to || ''), a.fare ? a.fare + '円' : '', a.driver ? a.driver + (a.vehicleNo ? '（' + a.vehicleNo + '）' : '') : '']
+    .filter(Boolean).join('\n');
+}
+
+/* ---------- 初期表示 ---------- */
+if (!key) showSetup(true);
+else api({ ping: true }).then(r => { if (r.ok) $('who').textContent = r.name + ' さん'; else showSetup(true); }).catch(() => {});
+add('sys', 'マイクのボタンを押すと、トライもんと声で話せます');
+</script>
+</body>
+</html>
