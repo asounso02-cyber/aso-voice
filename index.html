@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1720">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>麻生 配車 音声</title>
+<style>
+  :root { --bg:#0f1720; --card:#1b2632; --me:#1f7a4d; --bot:#26323f; --text:#eef3f7; --muted:#9fb0c0; --accent:#2fbf71; --warn:#e8a33d; --danger:#e0564b; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--text); font-family:-apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif; }
+  body { display:flex; flex-direction:column; padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+  header { display:flex; align-items:center; justify-content:space-between; padding:12px 16px; border-bottom:1px solid #223040; }
+  header h1 { font-size:17px; font-weight:600; margin:0; }
+  header .who { font-size:13px; color:var(--muted); }
+  #log { flex:1; overflow-y:auto; padding:12px 12px 4px; display:flex; flex-direction:column; gap:10px; }
+  .msg { max-width:86%; padding:10px 13px; border-radius:16px; line-height:1.55; font-size:16px; white-space:pre-wrap; word-break:break-word; }
+  .me { align-self:flex-end; background:var(--me); border-bottom-right-radius:4px; }
+  .bot { align-self:flex-start; background:var(--bot); border-bottom-left-radius:4px; }
+  .sys { align-self:center; color:var(--muted); font-size:13px; }
+  .opts { display:flex; flex-wrap:wrap; gap:8px; padding:4px 12px 0; }
+  .opts button { background:var(--card); color:var(--text); border:1px solid #33475a; border-radius:18px; padding:8px 14px; font-size:15px; }
+  #live { min-height:24px; padding:6px 16px; color:var(--muted); font-size:15px; }
+  #controls { display:flex; flex-direction:column; align-items:center; gap:10px; padding:8px 16px 14px; }
+  #mic { width:96px; height:96px; border-radius:50%; border:none; background:var(--accent); color:#fff; font-size:15px; font-weight:700; box-shadow:0 0 0 0 rgba(47,191,113,.6); }
+  #mic.on { background:var(--danger); animation:pulse 1.6s infinite; }
+  #mic.busy { background:var(--warn); animation:none; }
+  @keyframes pulse { 0%{box-shadow:0 0 0 0 rgba(224,86,75,.55)} 70%{box-shadow:0 0 0 18px rgba(224,86,75,0)} 100%{box-shadow:0 0 0 0 rgba(224,86,75,0)} }
+  #state { font-size:14px; color:var(--muted); }
+  #textrow { display:flex; gap:8px; width:100%; }
+  #text { flex:1; background:var(--card); color:var(--text); border:1px solid #33475a; border-radius:20px; padding:10px 14px; font-size:16px; }
+  #send { background:var(--card); color:var(--text); border:1px solid #33475a; border-radius:20px; padding:0 16px; font-size:15px; }
+  #setup { position:fixed; inset:0; background:var(--bg); display:none; flex-direction:column; justify-content:center; padding:24px; gap:14px; }
+  #setup h2 { margin:0; font-size:20px; }
+  #setup p { margin:0; color:var(--muted); line-height:1.6; }
+  #setup input { background:var(--card); color:var(--text); border:1px solid #33475a; border-radius:10px; padding:12px; font-size:18px; }
+  #setup button { background:var(--accent); color:#fff; border:none; border-radius:10px; padding:14px; font-size:17px; font-weight:700; }
+  #setupErr { color:var(--danger); min-height:20px; font-size:14px; }
+  .link { background:none; border:none; color:var(--muted); font-size:13px; text-decoration:underline; }
+</style>
+</head>
+<body>
+<header>
+  <h1>麻生 配車 音声</h1>
+  <div><span class="who" id="who"></span> <button class="link" id="reset">合言葉を変える</button></div>
+</header>
+
+<div id="log"></div>
+<div class="opts" id="opts"></div>
+<div id="live"></div>
+
+<div id="controls">
+  <button id="mic" aria-label="会話を始める">話す</button>
+  <div id="state">ボタンを押すと、話しっぱなしで仮配車を入れられます</div>
+  <div id="textrow">
+    <input id="text" placeholder="文字で送るときはここ" enterkeyhint="send">
+    <button id="send">送信</button>
+  </div>
+</div>
+
+<div id="setup">
+  <h2>はじめに合言葉を入れてください</h2>
+  <p>社長から聞いた合言葉を入れると、この端末で使えるようになります。1回入れれば、次からは入れなくて大丈夫です。</p>
+  <input id="keyInput" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="合言葉">
+  <div id="setupErr"></div>
+  <button id="keyOk">決定</button>
+</div>
+
+<script>
+// Apps Script（LINE配車ボットと同じ頭脳）の受け口
+const API = 'https://script.google.com/macros/s/AKfycbyAzCK7MA4kWlkeFBu1ZObxm5xeoxoi8NUyHXBFLP9MFKL8y_9VQPvGUw7b9MGJnQuqLw/exec';
+const STOP_WORDS = ['終わり', 'おわり', '終了', 'ストップ', '止めて', 'とめて'];
+
+const $ = id => document.getElementById(id);
+const logEl = $('log'), optsEl = $('opts'), liveEl = $('live'), micEl = $('mic'), stateEl = $('state');
+
+let key = '';
+try { key = localStorage.getItem('aso_voice_key') || ''; } catch (e) {}
+
+let mode = false;        // 会話モード中か
+let busy = false;        // 送信・読み上げ中
+let rec = null;          // 音声認識
+let wakeLock = null;
+
+/* ---------- 画面 ---------- */
+function add(cls, text) {
+  const d = document.createElement('div');
+  d.className = 'msg ' + cls;
+  d.textContent = text;
+  logEl.appendChild(d);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function setOptions(list) {
+  optsEl.innerHTML = '';
+  (list || []).forEach(o => {
+    const b = document.createElement('button');
+    b.textContent = o;
+    b.onclick = () => send(o);
+    optsEl.appendChild(b);
+  });
+}
+function setState(t) { stateEl.textContent = t; }
+function setMic(cls, label) {
+  micEl.className = cls || '';
+  micEl.textContent = label;
+}
+
+/* ---------- 合言葉 ---------- */
+async function api(body) {
+  const res = await fetch(API, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify(Object.assign({ webKey: key }, body))
+  });
+  return res.json();
+}
+async function checkKey() {
+  if (!key) { $('setup').style.display = 'flex'; return; }
+  try {
+    const r = await api({ ping: true });
+    if (!r.ok) throw new Error(r.error || '合言葉が違います');
+    $('who').textContent = r.name + ' さん';
+    $('setup').style.display = 'none';
+    if (!logEl.children.length) add('sys', 'たとえば「PKロジ、藤沢から小山、6万、20日着で前日積み」と話してください。');
+  } catch (e) {
+    $('setup').style.display = 'flex';
+    $('setupErr').textContent = String(e.message || e);
+  }
+}
+$('keyOk').onclick = () => {
+  key = $('keyInput').value.trim();
+  try { localStorage.setItem('aso_voice_key', key); } catch (e) {}
+  $('setupErr').textContent = '';
+  checkKey();
+};
+$('reset').onclick = () => {
+  stopMode();
+  key = '';
+  try { localStorage.removeItem('aso_voice_key'); } catch (e) {}
+  $('keyInput').value = '';
+  $('setup').style.display = 'flex';
+};
+
+/* ---------- 送信 ---------- */
+async function send(text) {
+  text = String(text || '').trim();
+  if (!text || busy) return;
+  if (STOP_WORDS.some(w => text.replace(/[。、\s]/g, '') === w)) { add('me', text); stopMode(); return; }
+  busy = true;
+  stopListening();
+  setOptions([]);
+  add('me', text);
+  liveEl.textContent = '';
+  setMic('busy', '考え中');
+  setState('考えています…');
+  let reply;
+  try {
+    reply = await api({ text: text });
+    if (!reply.ok) throw new Error(reply.error || 'エラー');
+  } catch (e) {
+    add('sys', 'つながりませんでした：' + (e.message || e));
+    busy = false;
+    afterReply();
+    return;
+  }
+  const msgs = reply.messages || [];
+  let speakText = '';
+  let opts = [];
+  msgs.forEach(m => { add('bot', m.text); speakText += m.text + '\n'; if (m.options && m.options.length) opts = m.options; });
+  setOptions(opts);
+  await speak(speakText);
+  busy = false;
+  afterReply();
+}
+$('send').onclick = () => { const t = $('text').value; $('text').value = ''; send(t); };
+$('text').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); $('send').click(); } });
+
+function afterReply() {
+  if (mode) listen(); else { setMic('', '話す'); setState('ボタンを押すと、話しっぱなしで仮配車を入れられます'); }
+}
+
+/* ---------- 読み上げ ---------- */
+function speakable(t) {
+  return t.replace(/[【】]/g, '').replace(/→/g, 'から').replace(/（/g, '、').replace(/）/g, '、')
+          .replace(/(\d+)\/(\d+)/g, '$1月$2日').replace(/\n+/g, '。');
+}
+function speak(text) {
+  return new Promise(resolve => {
+    if (!('speechSynthesis' in window) || !text.trim()) return resolve();
+    try {
+      speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(speakable(text));
+      u.lang = 'ja-JP';
+      u.rate = 1.15;
+      const ja = speechSynthesis.getVoices().find(v => /ja/i.test(v.lang));
+      if (ja) u.voice = ja;
+      u.onend = () => resolve();
+      u.onerror = () => resolve();
+      setMic('busy', '読み上げ中');
+      setState('読み上げています（終わったら自動で聞きます）');
+      speechSynthesis.speak(u);
+    } catch (e) { resolve(); }
+  });
+}
+
+/* ---------- 聞き取り ---------- */
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+function listen() {
+  if (!SR) { setState('このブラウザは音声入力に対応していません。Chrome か Safari で開いてください'); return; }
+  if (busy) return;
+  rec = new SR();
+  rec.lang = 'ja-JP';
+  rec.interimResults = true;
+  rec.continuous = false;
+  let finalText = '';
+  rec.onresult = e => {
+    let interim = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const t = e.results[i][0].transcript;
+      if (e.results[i].isFinal) finalText += t; else interim += t;
+    }
+    liveEl.textContent = finalText + interim;
+  };
+  rec.onerror = e => {
+    if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+      add('sys', 'マイクが使えません。ブラウザの設定でマイクを許可してください');
+      stopMode();
+    }
+  };
+  rec.onend = () => {
+    rec = null;
+    if (finalText.trim()) { send(finalText); return; }
+    if (mode && !busy) setTimeout(listen, 250); // 黙っていて切れたら聞き直す
+  };
+  try {
+    rec.start();
+    setMic('on', '聞いています');
+    setState('どうぞ話してください（「終わり」で止まります）');
+  } catch (e) {
+    setTimeout(() => { if (mode && !busy) listen(); }, 500);
+  }
+}
+function stopListening() {
+  if (rec) { try { rec.onend = null; rec.abort(); } catch (e) {} rec = null; }
+}
+
+/* ---------- 会話モードのオン・オフ ---------- */
+async function startMode() {
+  mode = true;
+  // iPhone は最初のタップの中で一度読み上げを動かしておかないと、あとで声が出ない
+  try { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); } catch (e) {}
+  try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {}
+  listen();
+}
+function stopMode() {
+  mode = false;
+  stopListening();
+  try { speechSynthesis.cancel(); } catch (e) {}
+  try { if (wakeLock) wakeLock.release(); } catch (e) {}
+  wakeLock = null;
+  liveEl.textContent = '';
+  if (!busy) { setMic('', '話す'); setState('止めました。もう一度押すと再開します'); }
+}
+micEl.onclick = () => { if (mode) stopMode(); else startMode(); };
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState === 'visible' && mode && !wakeLock) {
+    try { wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {}
+  }
+});
+
+checkKey();
+</script>
+</body>
+</html>
