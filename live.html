@@ -66,6 +66,8 @@ try { key = localStorage.getItem('aso_voice_key') || ''; } catch (e) {}
 let ws = null, running = false, micCtx = null, micStream = null, proc = null;
 let outCtx = null, playHead = 0, playing = [];
 let aiBubble = null, meBubble = null, wakeLock = null;
+let lastUser = '';
+const OK_RE = /(はい|ハイ|そのまま|お願い|おねがい|いいよ|いいです|オッケー|ok|OK|大丈夫|登録して|それで)/;
 
 function add(cls, text) {
   const d = document.createElement('div'); d.className = cls; d.textContent = text;
@@ -104,7 +106,8 @@ function instruction(j) {
     '聞く順番（すでに分かっている項目は聞かない）：荷主 → 日付（積込日か着日。着日だけなら前日積みか当日積みか） → 積地 → 降地 → 運賃（税抜。高速代が別なら一緒に） → 担当ドライバーと車番 → 品目・重量（なければ飛ばしてよい）。',
     '音声認識なので「積み」が「済み」と聞こえることがある。「20日積みの23日着」は積込日20日・着日23日。',
     'そろったら、要点を1〜2文で読み上げて「これで仮登録していい？」と聞く。',
-    '相手が「はい」「そのまま」「お願い」などと認めたときだけ、register_haisha を呼ぶ。直したいと言われたら直してからもう一度確認する。',
+    '確認の質問のすぐ後に相手が「はい」「そのまま」「お願い」などとはっきり認めたときだけ、register_haisha を呼ぶ。それ以外の返事（追加の情報、「なし」など）のときは、内容に反映してからもう一度確認する。直したいと言われたら直してからもう一度確認する。',
+    'shipper は必ず「これまでの荷主名」の表記をそのまま使う（例：PKなら「PKロジスティックス株式会社 藤沢(営)」）。積地・降地も「よく使う積地・降地」の表記に合わせる。',
     'register_haisha の結果が返ったら、登録番号を伝える。似ている便があれば、消していないので確認してほしいと伝える。',
     '「キャンセル」「やめる」と言われたら登録しない。',
     '',
@@ -221,6 +224,7 @@ async function onMessage(e) {
   if (sc.inputTranscription && sc.inputTranscription.text) {
     if (!meBubble) meBubble = add('b me', '');
     meBubble.textContent += sc.inputTranscription.text;
+    lastUser = meBubble.textContent;
     aiBubble = null;
   }
   if (sc.outputTranscription && sc.outputTranscription.text) {
@@ -261,6 +265,11 @@ async function handleTool(tc) {
   const responses = [];
   for (const fc of tc.functionCalls || []) {
     if (fc.name !== 'register_haisha') { responses.push({ id: fc.id, name: fc.name, response: { ok: false, error: 'unknown' } }); continue; }
+    // 安全装置：直前の相手の言葉が「はい・そのまま」などでなければ登録しない
+    if (!OK_RE.test(lastUser)) {
+      responses.push({ id: fc.id, name: fc.name, response: { ok: false, error: '相手はまだ登録を認めていません。要点を1〜2文で読み上げて「これで仮登録していい？」と聞き、「はい」などの返事を待ってから呼んでください。' } });
+      continue;
+    }
     const card = add('card', '登録しています…\n' + describe(fc.args || {}));
     let r;
     try { r = await api({ register: fc.args || {} }); } catch (e) { r = { ok: false, error: e.message }; }
