@@ -117,7 +117,7 @@ function instruction(j) {
     'そろったら、要点を1〜2文で読み上げて「これで仮登録していい？」と聞く。',
     '確認の質問のすぐ後に相手が「はい」「そのまま」「お願い」などとはっきり認めたときだけ、register_haisha を呼ぶ。それ以外の返事（追加の情報、「なし」など）のときは、内容に反映してからもう一度確認する。直したいと言われたら直してからもう一度確認する。',
     'shipper は必ず「これまでの荷主名」の表記をそのまま使う（例：PKなら「PKロジスティックス株式会社 藤沢(営)」）。積地・降地も「よく使う積地・降地」の表記に合わせる。',
-    'register_haisha の結果が返ったら、登録番号を伝える。似ている便があれば、消していないので確認してほしいと伝える。',
+    'register_haisha の結果が返ったら、登録番号と「配車カレンダーの受付箱に入れたので、アプリで確定してね」と伝える。似ている便があれば、消していないので確認してほしいと伝える。',
     '「キャンセル」「やめる」と言われたら登録しない。',
     '',
     '取引先（請求先の略称：正式名）：' + m.customers,
@@ -285,12 +285,13 @@ async function handleTool(tc) {
     try { r = await api({ register: fc.args || {} }); } catch (e) { r = { ok: false, error: e.message }; }
     if (r.ok) {
       card.classList.add('ok');
-      card.textContent = '登録しました（No.' + r.no + '・状況：仮）\n' + r.summary +
+      const appLine = r.app && r.app.ok ? '配車カレンダーの依頼受付箱に入れました（確認待ち）' : '※配車カレンダーへの登録は失敗（シートには入っています）';
+      card.textContent = '登録しました（No.' + r.no + '・状況：仮）\n' + appLine + '\n' + r.summary +
         (r.similar && r.similar.length ? '\n\n似ている便があります（消していません）：\n' + r.similar.map(s => 'No.' + s.no + '：' + s.summary).join('\n') : '');
     } else {
       card.textContent = '登録できませんでした：' + (r.error || '');
     }
-    responses.push({ id: fc.id, name: fc.name, response: r.ok ? { ok: true, no: r.no, similar: (r.similar || []).map(s => 'No.' + s.no + ' ' + s.summary) } : { ok: false, error: r.error } });
+    responses.push({ id: fc.id, name: fc.name, response: r.ok ? { ok: true, no: r.no, calendar: r.app && r.app.ok ? '依頼受付箱に確認待ちで入った' : '配車カレンダーへは失敗', similar: (r.similar || []).map(s => 'No.' + s.no + ' ' + s.summary) } : { ok: false, error: r.error } });
   }
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ toolResponse: { functionResponses: responses } }));
 }
